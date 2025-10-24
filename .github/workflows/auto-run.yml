@@ -1,0 +1,86 @@
+# DNS IP Test - Cloudflare优选域名DNS解析器自动化工作流 v1.0.0
+# 每3小时自动执行一次，用于解析、检测和识别Cloudflare优选域名的IP状态
+#
+# 主要特性:
+# - 智能缓存系统，支持TTL机制
+# - 并发处理，大幅提升检测速度
+# - DNS解析优化，支持多DNS服务器
+# - 完善日志，所有操作都有Emoji记录
+# - 错误处理，特别优化DNS解析错误
+# - 自动限制缓存大小，防止文件过大
+# - 防卡住优化：批次超时保护，小批次处理
+# - 超快检测：3秒单IP超时，实时进度显示
+# - 代码质量优化：健壮性增强，异常处理完善
+# - 配置统一：修复配置不一致问题，达到生产级质量
+
+name: DNS IP Test
+
+# 触发条件配置
+on:
+  schedule:
+    # 定时执行：每3小时执行一次（UTC时间）
+    # cron格式：分 时 日 月 周
+    # 0 */3 * * * 表示每3小时的整点执行，例如0:00、3:00、6:00、9:00...
+    - cron: '0 */3 * * *'
+  workflow_dispatch: # 允许手动触发（在GitHub页面点击"Run workflow"按钮）
+
+# 工作流任务定义
+jobs:
+  dns-ip-test:
+    # 任务名称：DNS解析和IP检测
+    runs-on: ubuntu-latest # 运行环境：最新版Ubuntu（GitHub托管的Runner）
+    
+    permissions: # 设置权限
+      contents: write # 允许写入内容（提交和推送）
+      actions: read # 允许读取actions
+    
+    steps:
+      # 步骤1：拉取仓库代码到运行环境
+      - name: Checkout code
+        uses: actions/checkout@v4 # 使用官方最新版checkout工具
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # 使用GitHub token进行身份验证
+      
+      # 步骤2：配置Python环境
+      - name: Set up Python
+        uses: actions/setup-python@v5 # 官方Python环境配置工具（使用最新版本）
+        with:
+          python-version: '3.11' # 指定Python版本（与脚本兼容）
+      
+      # 步骤3：安装Python依赖库
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip # 升级pip到最新版（避免旧版本安装问题）
+          pip install requests>=2.31.0 dnspython>=2.4.0 urllib3>=2.0.0 # 安装脚本依赖（requests用于网络请求，dnspython用于DNS解析，urllib3处理SSL）
+      
+      # 步骤4：执行DNS解析和IP检测脚本
+      - name: Run DNS IP Test
+        run: |
+          python DNSIPtest.py # 运行核心脚本
+      
+      # 步骤5：上传结果文件作为构建产物
+      - name: Upload results
+        uses: actions/upload-artifact@v4 # 上传构建产物工具（使用最新版本）
+        with:
+          name: dns-ip-results # 产物名称
+          path: | # 上传的文件路径
+            DNSIPlist.txt # 可用IP列表
+            SenflareDNS.txt # 格式化结果
+            DNSIPtest.log # 运行日志
+            Cache.json # 地区缓存
+      
+      # 步骤6：提交结果到仓库
+      - name: Commit results
+        run: |
+          # 配置Git提交者信息（使用GitHub Actions默认身份）
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # 添加结果文件到暂存区
+          git add DNSIPlist.txt SenflareDNS.txt Cache.json DNSIPtest.log
+          
+          # 检查文件是否有变化，有变化则提交
+          git diff --staged --quiet || git commit -m "Update DNS IP results - $(date)"
+          
+          # 推送到远程仓库
+          git push
