@@ -31,13 +31,13 @@ ENV/
 *.swp
 *.swo
 
-# Logs
-*.log
+# Logs (keep DNSIPtest.log for debugging)
+# *.log
 
-# Output files
-DNSIPlist.txt
-SenflareDNS.txt
-region_cache.json
+# Output files (keep these for GitHub Actions)
+# DNSIPlist.txt
+# SenflareDNS.txt
+# Cache.json
 
 # OS
 .DS_Store
