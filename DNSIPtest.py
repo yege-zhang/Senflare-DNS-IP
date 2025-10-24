@@ -388,6 +388,85 @@ def test_ip_availability(ip):
     return (False, 0, 0)
 
 
+def test_ip_bandwidth(ip, test_size_mb=1):
+    """测试IP带宽 - 通过TCP连接速度测试"""
+    try:
+        # 验证IP地址格式
+        parts = ip.split('.')
+        if len(parts) != 4 or not all(0 <= int(part) <= 255 for part in parts):
+            return (False, 0, 0)
+        
+        # 测试多个端口来模拟带宽测试
+        test_ports = [80, 443, 8080, 8443]
+        best_speed = 0
+        best_latency = 0
+        
+        for port in test_ports:
+            try:
+                start_time = time.time()
+                
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5)
+                    
+                    # 尝试连接
+                    if s.connect_ex((ip, port)) == 0:
+                        connect_time = time.time() - start_time
+                        latency = connect_time * 1000
+                        
+                        # 模拟数据传输测试
+                        try:
+                            # 发送一些数据来测试传输速度
+                            test_data = b'GET / HTTP/1.1\r\nHost: ' + ip.encode() + b'\r\n\r\n'
+                            s.send(test_data)
+                            
+                            # 尝试接收响应
+                            response = s.recv(1024)
+                            if response:
+                                # 计算传输速度（基于连接时间和数据传输）
+                                # 这里使用连接时间作为速度的参考指标
+                                speed_mbps = (len(test_data) + len(response)) * 8 / (connect_time * 1000000)
+                                best_speed = max(best_speed, speed_mbps)
+                                best_latency = latency if best_latency == 0 else min(best_latency, latency)
+                                
+                                logger.info(f"📊 {ip}:{port} 连接测试: 延迟 {latency:.1f}ms")
+                                
+                        except Exception as e:
+                            logger.debug(f"IP {ip}:{port} 数据传输测试失败: {str(e)[:30]}")
+                            continue
+                    
+            except Exception as e:
+                logger.debug(f"IP {ip}:{port} 连接测试失败: {str(e)[:30]}")
+                continue
+        
+        if best_speed > 0:
+            return (True, best_speed, best_latency)
+        else:
+            # 如果带宽测试失败，返回延迟测试结果
+            is_available, latency = test_ip_availability(ip)
+            if is_available:
+                return (True, 0, latency)  # 返回0表示带宽测试失败，但延迟可用
+            else:
+                return (False, 0, 0)
+            
+    except Exception as e:
+        logger.error(f"IP {ip} 带宽测试异常: {str(e)[:50]}")
+        return (False, 0, 0)
+
+
+def test_ip_comprehensive(ip):
+    """综合测试IP - 延迟 + 带宽"""
+    # 先测试延迟
+    is_available, min_delay, avg_delay = test_ip_availability(ip)
+    
+    if not is_available:
+        return (False, 0, 0, 0, 0)
+    
+    # 再测试带宽
+    is_fast, bandwidth, latency = test_ip_bandwidth(ip)
+    
+    return (True, min_delay, avg_delay, bandwidth, latency)
+
+
 # ===== 地区识别模块 =====
 
 def get_ip_region(ip):
@@ -456,12 +535,13 @@ def get_country_name(code):
 
 # ===== 并发处理模块 =====
 
-def test_ips_concurrently(ips, max_workers=None):
+def test_ips_concurrently(ips, max_workers=None, test_bandwidth=False):
     """超快并发检测IP可用性 - 优化版本"""
     if max_workers is None:
         max_workers = CONFIG["max_workers"]
     
-    logger.info(f"📡 开始并发检测 {len(ips)} 个IP，使用 {max_workers} 个线程")
+    test_type = "延迟+带宽" if test_bandwidth else "延迟"
+    logger.info(f"📡 开始并发检测 {len(ips)} 个IP，使用 {max_workers} 个线程，测试类型: {test_type}")
     available_ips = []
     
     # 使用更小的批次，避免卡住
@@ -477,23 +557,35 @@ def test_ips_concurrently(ips, max_workers=None):
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交批次任务，添加超时保护
-            future_to_ip = {executor.submit(test_ip_availability, ip): ip for ip in batch_ips}
+            if test_bandwidth:
+                future_to_ip = {executor.submit(test_ip_comprehensive, ip): ip for ip in batch_ips}
+            else:
+                future_to_ip = {executor.submit(test_ip_availability, ip): ip for ip in batch_ips}
             
             # 处理完成的任务
             batch_completed = 0
-            for future in as_completed(future_to_ip, timeout=30):  # 添加30秒超时保护
+            timeout = 60 if test_bandwidth else 30  # 带宽测试需要更长时间
+            for future in as_completed(future_to_ip, timeout=timeout):
                 ip = future_to_ip[future]
                 batch_completed += 1
                 completed = i + batch_completed
                 elapsed = time.time() - start_time
                 
                 try:
-                    is_available, min_delay, avg_delay = future.result()
-                    if is_available:
-                        available_ips.append((ip, min_delay, avg_delay))
-                        logger.info(f"[{completed}/{len(ips)}] {ip} ✅ 可用（延迟 {min_delay}ms，平均 {avg_delay:.1f}ms）- 耗时: {elapsed:.1f}s")
+                    if test_bandwidth:
+                        is_available, min_delay, avg_delay, bandwidth, latency = future.result()
+                        if is_available:
+                            available_ips.append((ip, min_delay, avg_delay, bandwidth, latency))
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ✅ 可用（延迟 {min_delay}ms，带宽 {bandwidth:.2f}Mbps）- 耗时: {elapsed:.1f}s")
+                        else:
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用 - 耗时: {elapsed:.1f}s")
                     else:
-                        logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用 - 耗时: {elapsed:.1f}s")
+                        is_available, min_delay, avg_delay = future.result()
+                        if is_available:
+                            available_ips.append((ip, min_delay, avg_delay))
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ✅ 可用（延迟 {min_delay}ms，平均 {avg_delay:.1f}ms）- 耗时: {elapsed:.1f}s")
+                        else:
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用 - 耗时: {elapsed:.1f}s")
                     
                     # 添加小延迟确保日志顺序
                     time.sleep(0.01)  # 10ms延迟
@@ -618,7 +710,9 @@ def main():
 
     # 5. 并发检测IP可用性
     logger.info("📡 ===== 并发检测IP可用性 =====")
-    available_ips = test_ips_concurrently(unique_ips)
+    # 可以选择是否测试带宽（默认只测试延迟）
+    test_bandwidth = False  # 设置为True来测试带宽
+    available_ips = test_ips_concurrently(unique_ips, test_bandwidth=test_bandwidth)
     
     # 6. 保存可用IP列表
     if available_ips:
