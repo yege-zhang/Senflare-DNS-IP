@@ -94,7 +94,7 @@ CONFIG = {
     "advanced_mode": True,          # 高级模式开关（True=开启，False=关闭）
     "tcp_ping_count": 5,            # TCP Ping测试次数
     "bandwidth_test_count": 3,       # 带宽测试次数
-    "bandwidth_test_size_mb": 1,     # 带宽测试文件大小（MB）
+    "bandwidth_test_size_mb": 10,     # 带宽测试文件大小（MB）
     "latency_filter_percentage": 30, # 延迟排名前百分比（取前30%的IP）
 }
 
