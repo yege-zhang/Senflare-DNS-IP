@@ -56,10 +56,6 @@ CONFIG = {
         '182.254.116.116': '腾讯-DNS',
         '114.114.114.114': '114-DNS',
         '114.114.115.115': '114-DNS',
-        '101.226.4.6': '360-DNS',
-        '218.30.118.6': '360-DNS',
-        '123.125.81.6': '搜狗-DNS',
-        '140.207.198.6': '搜狗-DNS',
         
         # 运营商DNS（返回运营商优化IP，延迟最低）
         # 中国电信（暂时注释，DNS服务器不可用）
@@ -81,11 +77,18 @@ CONFIG = {
     "api_timeout": 5,               # API查询超时时间
     "query_interval": 0.2,          # API查询间隔（增加到0.2秒）
     
-    
     # 并发处理配置（GitHub Actions环境优化）
     "max_workers": 15,              # 最大并发线程数（减少以适应GitHub Actions）
     "batch_size": 8,                # 批量处理大小（减少以适应GitHub Actions）
     "cache_ttl_hours": 168,         # 缓存TTL（7天）
+    
+    # 高级功能配置
+    "advanced_mode": True,          # 是否开启高级功能
+    "tcp_ping_count": 5,            # TCP ping次数
+    "bandwidth_test_count": 3,       # 带宽测试次数
+    "bandwidth_test_size_mb": 1,     # 带宽测试文件大小(MB)
+    "latency_filter_percentage": 30, # 延迟排名前百分比（取前30%的IP）
+    "save_basic_files": True,        # 是否保存基础文件（DNSIPlist.txt, SenflareDNS.txt）
 }
 
 # ===== 国家/地区映射表（简化版）=====
@@ -333,31 +336,27 @@ def resolve_domain_multiple_methods(domain):
 
 # ===== 网络检测模块 =====
 
-def test_ip_availability(ip):
-    """TCP Socket检测IP可用性 - 优化版本"""
+def quick_filter_ip(ip):
+    """快速筛选IP - 单次ping测试，剔除明显不好的IP"""
     # 验证IP地址格式
     try:
         parts = ip.split('.')
         if len(parts) != 4 or not all(0 <= int(part) <= 255 for part in parts):
-            return (False, 0, 0)
+            return False
     except (ValueError, AttributeError):
-        return (False, 0, 0)
+        return False
     
     # 检查测试端口配置
     if not CONFIG["test_ports"] or not isinstance(CONFIG["test_ports"], list):
-        logger.warning(f"⚠️ 测试端口配置无效，跳过IP {ip}")
-        return (False, 0, 0)
+        return False
     
     min_delay = float('inf')
-    success_count = 0
-    total_delay = 0
     
-    # 遍历配置的测试端口
+    # 遍历配置的测试端口，只测试一次
     for port in CONFIG["test_ports"]:
         try:
             # 验证端口号
             if not isinstance(port, int) or not (1 <= port <= 65535):
-                logger.warning(f"⚠️ 无效端口号 {port}，跳过")
                 continue
                 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -368,75 +367,170 @@ def test_ip_availability(ip):
                 if s.connect_ex((ip, port)) == 0:
                     delay = round((time.time() - start_time) * 1000)
                     min_delay = min(min_delay, delay)
-                    total_delay += delay
-                    success_count += 1
                     
-                    # 如果延迟很好，立即返回最佳结果
+                    # 如果延迟很好，立即返回
                     if delay < 200:
-                        return (True, delay, delay)
+                        return (True, delay)
         except (socket.timeout, socket.error, OSError):
             continue  # 继续测试下一个端口
         except Exception as e:
-            logger.debug(f"IP {ip} 端口 {port} 检测异常: {str(e)[:30]}")
+            logger.debug(f"IP {ip} 端口 {port} 快速筛选异常: {str(e)[:30]}")
             continue
     
-    # 返回最佳结果
-    if success_count > 0:
-        avg_delay = total_delay / success_count
-        return (True, min_delay, avg_delay)
+    # 如果延迟超过500ms，直接剔除
+    if min_delay > 500:
+        return (False, 0)
     
-    return (False, 0, 0)
+    # 如果无法连接，直接剔除
+    if min_delay == float('inf'):
+        return (False, 0)
+    
+    return (True, min_delay)
 
-
-def test_ip_bandwidth(ip, test_size_mb=1):
-    """测试IP带宽 - 通过TCP连接速度测试"""
+def test_ip_availability(ip, ping_count=None):
+    """TCP Socket检测IP可用性 - 多次ping测试版本"""
+    if ping_count is None:
+        ping_count = CONFIG["tcp_ping_count"]
+    # 验证IP地址格式
     try:
+        parts = ip.split('.')
+        if len(parts) != 4 or not all(0 <= int(part) <= 255 for part in parts):
+            return (False, 0, 0, 0)
+    except (ValueError, AttributeError):
+        return (False, 0, 0, 0)
+    
+    # 检查测试端口配置
+    if not CONFIG["test_ports"] or not isinstance(CONFIG["test_ports"], list):
+        logger.warning(f"⚠️ 测试端口配置无效，跳过IP {ip}")
+        return (False, 0, 0, 0)
+    
+    all_delays = []
+    success_count = 0
+    
+    # 多次ping测试
+    for ping_attempt in range(ping_count):
+        min_delay = float('inf')
+        
+        # 遍历配置的测试端口
+        for port in CONFIG["test_ports"]:
+            try:
+                # 验证端口号
+                if not isinstance(port, int) or not (1 <= port <= 65535):
+                    continue
+                    
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(3)  # 3秒超时
+                    start_time = time.time()
+                    
+                    # 尝试TCP连接
+                    if s.connect_ex((ip, port)) == 0:
+                        delay = round((time.time() - start_time) * 1000)
+                        min_delay = min(min_delay, delay)
+                        
+                        # 如果延迟很好，记录并继续
+                        if delay < 200:
+                            all_delays.append(delay)
+                            success_count += 1
+                            break  # 找到好的延迟就跳出端口循环
+            except (socket.timeout, socket.error, OSError):
+                continue  # 继续测试下一个端口
+            except Exception as e:
+                logger.debug(f"IP {ip} 端口 {port} 检测异常: {str(e)[:30]}")
+                continue
+        
+        # 如果这次ping没有成功，记录一个高延迟值
+        if min_delay == float('inf'):
+            all_delays.append(999)  # 标记为失败
+        else:
+            all_delays.append(min_delay)
+    
+    # 计算统计结果
+    if success_count > 0:
+        # 过滤掉失败的值（999）
+        valid_delays = [d for d in all_delays if d < 999]
+        if valid_delays:
+            min_delay = min(valid_delays)
+            avg_delay = sum(valid_delays) / len(valid_delays)
+            # 计算稳定性（方差）
+            variance = sum((d - avg_delay) ** 2 for d in valid_delays) / len(valid_delays)
+            stability = round(variance, 2)
+            return (True, min_delay, avg_delay, stability)
+    
+    return (False, 0, 0, 0)
+
+
+def test_ip_bandwidth(ip, test_size_mb=None):
+    """测试IP带宽 - 通过HTTP下载测试"""
+    if test_size_mb is None:
+        test_size_mb = CONFIG["bandwidth_test_size_mb"]
+    try:
+        import requests
+        
         # 验证IP地址格式
         parts = ip.split('.')
         if len(parts) != 4 or not all(0 <= int(part) <= 255 for part in parts):
             return (False, 0, 0)
         
-        # 测试多个端口来模拟带宽测试
-        test_ports = [80, 443, 8080, 8443]
+        # 使用真实的下载测试来测量带宽
+        test_size_bytes = test_size_mb * 1024 * 1024
+        test_urls = [
+            # 使用一些公开的测试文件
+            f"https://speed.cloudflare.com/__down?bytes={test_size_bytes}",  # 可配置大小测试文件
+            f"https://httpbin.org/bytes/{test_size_bytes}",  # 可配置大小测试文件
+        ]
+        
         best_speed = 0
         best_latency = 0
         
-        for port in test_ports:
-            try:
-                start_time = time.time()
-                
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5)
+        # 使用配置的测试次数
+        test_count = CONFIG["bandwidth_test_count"]
+        for test_attempt in range(test_count):
+            for url in test_urls:
+                try:
+                    start_time = time.time()
                     
-                    # 尝试连接
-                    if s.connect_ex((ip, port)) == 0:
-                        connect_time = time.time() - start_time
-                        latency = connect_time * 1000
+                    # 发送HTTP请求测试带宽
+                    response = requests.get(
+                        url, 
+                        timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        stream=True
+                    )
+                    
+                    if response.status_code == 200:
+                        # 测量下载速度
+                        data_size = 0
+                        start_download = time.time()
                         
-                        # 模拟数据传输测试
-                        try:
-                            # 发送一些数据来测试传输速度
-                            test_data = b'GET / HTTP/1.1\r\nHost: ' + ip.encode() + b'\r\n\r\n'
-                            s.send(test_data)
+                        # 下载数据块来测试速度
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                data_size += len(chunk)
+                                # 限制测试时间，避免过长时间
+                                if time.time() - start_download > 10:  # 最多测试10秒
+                                    break
+                                # 如果下载了足够的数据就停止
+                                if data_size > 10 * 1024 * 1024:  # 10MB
+                                    break
+                        
+                        download_time = time.time() - start_download
+                        latency = (start_download - start_time) * 1000  # 延迟
+                        
+                        if download_time > 0 and data_size > 0:
+                            # 计算速度 (Mbps)
+                            speed_mbps = (data_size * 8) / (download_time * 1000000)
+                            best_speed = max(best_speed, speed_mbps)
+                            best_latency = latency if best_latency == 0 else min(best_latency, latency)
                             
-                            # 尝试接收响应
-                            response = s.recv(1024)
-                            if response:
-                                # 计算传输速度（基于连接时间和数据传输）
-                                # 这里使用连接时间作为速度的参考指标
-                                speed_mbps = (len(test_data) + len(response)) * 8 / (connect_time * 1000000)
-                                best_speed = max(best_speed, speed_mbps)
-                                best_latency = latency if best_latency == 0 else min(best_latency, latency)
-                                
-                                logger.info(f"📊 {ip}:{port} 连接测试: 延迟 {latency:.1f}ms")
-                                
-                        except Exception as e:
-                            logger.debug(f"IP {ip}:{port} 数据传输测试失败: {str(e)[:30]}")
-                            continue
-                    
-            except Exception as e:
-                logger.debug(f"IP {ip}:{port} 连接测试失败: {str(e)[:30]}")
-                continue
+                            logger.info(f"📊 {ip} 带宽测试: {speed_mbps:.2f} Mbps, 延迟: {latency:.1f}ms")
+                            
+                            # 如果速度很好，可以提前返回
+                            if speed_mbps > 5:  # 超过5Mbps就认为很好
+                                return (True, best_speed, best_latency)
+                
+                except Exception as e:
+                    logger.debug(f"IP {ip} 带宽测试失败: {str(e)[:50]}")
+                    continue
         
         if best_speed > 0:
             return (True, best_speed, best_latency)
@@ -453,18 +547,65 @@ def test_ip_bandwidth(ip, test_size_mb=1):
         return (False, 0, 0)
 
 
+def calculate_score(min_delay, avg_delay, bandwidth, stability):
+    """计算综合评分"""
+    # 延迟评分 (0-100, 延迟越低分数越高)
+    latency_score = max(0, 100 - avg_delay / 2)
+    
+    # 带宽评分 (0-100, 带宽越高分数越高)
+    bandwidth_score = min(100, bandwidth * 10)
+    
+    # 稳定性评分 (0-100, 稳定性越高分数越高)
+    stability_score = max(0, 100 - stability / 10)
+    
+    # 综合评分 (延迟占40%, 带宽占30%, 稳定性占30%)
+    total_score = latency_score * 0.4 + bandwidth_score * 0.3 + stability_score * 0.3
+    return round(total_score, 1)
+
 def test_ip_comprehensive(ip):
-    """综合测试IP - 延迟 + 带宽"""
+    """综合测试IP - 延迟 + 带宽 + 评分"""
     # 先测试延迟
-    is_available, min_delay, avg_delay = test_ip_availability(ip)
+    is_available, min_delay, avg_delay, stability = test_ip_availability(ip)
     
     if not is_available:
-        return (False, 0, 0, 0, 0)
+        return (False, 0, 0, 0, 0, 0)
+    
+    # 输出TCP ping日志
+    logger.info(f"🔍 {ip} TCP Ping 综合延迟：{avg_delay:.1f}ms")
     
     # 再测试带宽
     is_fast, bandwidth, latency = test_ip_bandwidth(ip)
     
-    return (True, min_delay, avg_delay, bandwidth, latency)
+    # 输出带宽测试日志
+    logger.info(f"⚡ {ip} 带宽综合速度：{bandwidth:.2f}Mbps")
+    
+    # 计算综合评分
+    score = calculate_score(min_delay, avg_delay, bandwidth, stability)
+    
+    return (True, min_delay, avg_delay, bandwidth, latency, score)
+
+def latency_filter_ips(ips_with_latency):
+    """延迟排名前百分比筛选"""
+    if not CONFIG["advanced_mode"] or not ips_with_latency:
+        return ips_with_latency
+    
+    # 按延迟排序
+    sorted_ips = sorted(ips_with_latency, key=lambda x: x[2])  # 按avg_delay排序
+    
+    # 计算前百分比的数量
+    percentage = CONFIG["latency_filter_percentage"]
+    keep_count = max(1, int(len(sorted_ips) * percentage / 100))
+    
+    # 取前N个IP
+    filtered_ips = sorted_ips[:keep_count]
+    
+    logger.info(f"🔍 延迟排名前{percentage}%筛选：从 {len(ips_with_latency)} 个IP中筛选出 {len(filtered_ips)} 个IP")
+    
+    # 显示筛选结果
+    for i, (ip, min_delay, avg_delay, stability) in enumerate(filtered_ips, 1):
+        logger.info(f"📊 {ip} 延迟排名第{i}位（{avg_delay:.1f}ms）")
+    
+    return filtered_ips
 
 
 # ===== 地区识别模块 =====
@@ -483,10 +624,10 @@ def get_ip_region(ip):
             logger.info(f"📦 IP {ip} 地区信息从缓存获取（旧格式）: {cached_data}")
             return cached_data
     
-    # 尝试主要API
-    logger.info(f"🌐 IP {ip} 开始API查询（主要API: ipinfo.io）...")
+    # 尝试主要API（免费版本）
+    logger.info(f"🌐 IP {ip} 开始API查询（主要API: ipinfo.io lite）...")
     try:
-        resp = session.get(f'https://ipinfo.io/{ip}?token=2cb674df499388', timeout=CONFIG["api_timeout"])
+        resp = session.get(f'https://api.ipinfo.io/lite/{ip}?token=2cb674df499388', timeout=CONFIG["api_timeout"])
         if resp.status_code == 200:
             country_code = resp.json().get('country', '').upper()
             if country_code:
@@ -535,12 +676,49 @@ def get_country_name(code):
 
 # ===== 并发处理模块 =====
 
+def quick_filter_ips(ips, max_workers=None):
+    """快速筛选IP - 剔除明显不好的IP"""
+    if max_workers is None:
+        max_workers = CONFIG["max_workers"]
+    
+    logger.info(f"🔍 开始快速筛选 {len(ips)} 个IP，剔除明显不好的IP...")
+    filtered_ips = []
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ip = {executor.submit(quick_filter_ip, ip): ip for ip in ips}
+        
+        for future in as_completed(future_to_ip):
+            ip = future_to_ip[future]
+            try:
+                result = future.result()
+                if isinstance(result, tuple):
+                    is_good, current_delay = result
+                    if is_good:
+                        filtered_ips.append(ip)
+                        logger.info(f"✅ 可用 {ip} - 已通过快速测试（延迟 {current_delay}ms）")
+                    else:
+                        logger.info(f"❌ {ip} 被快速筛选剔除")
+                else:
+                    # 兼容旧版本
+                    if result:
+                        filtered_ips.append(ip)
+                        logger.info(f"✅ 可用 {ip} - 已通过快速测试")
+                    else:
+                        logger.info(f"❌ {ip} 被快速筛选剔除")
+            except Exception as e:
+                logger.error(f"❌ {ip} 快速筛选出错: {str(e)[:30]}")
+    
+    elapsed = time.time() - start_time
+    logger.info(f"🔍 快速筛选完成，从 {len(ips)} 个IP中筛选出 {len(filtered_ips)} 个IP，耗时: {elapsed:.1f}秒")
+    return filtered_ips
+
 def test_ips_concurrently(ips, max_workers=None, test_bandwidth=False):
     """超快并发检测IP可用性 - 优化版本"""
     if max_workers is None:
         max_workers = CONFIG["max_workers"]
     
-    test_type = "延迟+带宽" if test_bandwidth else "延迟"
+    test_type = "带宽" if test_bandwidth else "延迟"
     logger.info(f"📡 开始并发检测 {len(ips)} 个IP，使用 {max_workers} 个线程，测试类型: {test_type}")
     available_ips = []
     
@@ -573,19 +751,20 @@ def test_ips_concurrently(ips, max_workers=None, test_bandwidth=False):
                 
                 try:
                     if test_bandwidth:
-                        is_available, min_delay, avg_delay, bandwidth, latency = future.result()
+                        is_available, min_delay, avg_delay, bandwidth, latency, score = future.result()
                         if is_available:
-                            available_ips.append((ip, min_delay, avg_delay, bandwidth, latency))
-                            logger.info(f"[{completed}/{len(ips)}] {ip} ✅ 可用（延迟 {min_delay}ms，带宽 {bandwidth:.2f}Mbps）- 耗时: {elapsed:.1f}s")
+                            available_ips.append((ip, min_delay, avg_delay, bandwidth, latency, score))
+                            # 不显示详情，等最终排名时再显示
+                            logger.info(f"⚡ {ip} 带宽综合速度：{bandwidth:.2f}Mbps")
                         else:
-                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用 - 耗时: {elapsed:.1f}s")
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用")
                     else:
-                        is_available, min_delay, avg_delay = future.result()
+                        is_available, min_delay, avg_delay, stability = future.result()
                         if is_available:
-                            available_ips.append((ip, min_delay, avg_delay))
-                            logger.info(f"[{completed}/{len(ips)}] {ip} ✅ 可用（延迟 {min_delay}ms，平均 {avg_delay:.1f}ms）- 耗时: {elapsed:.1f}s")
+                            available_ips.append((ip, min_delay, avg_delay, stability))
+                            logger.info(f"📊 [{completed}/{len(ips)}] {ip}（延迟 {min_delay}ms，平均 {avg_delay:.1f}ms）")
                         else:
-                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用 - 耗时: {elapsed:.1f}s")
+                            logger.info(f"[{completed}/{len(ips)}] {ip} ❌ 不可用")
                     
                     # 添加小延迟确保日志顺序
                     time.sleep(0.01)  # 10ms延迟
@@ -601,6 +780,13 @@ def test_ips_concurrently(ips, max_workers=None, test_bandwidth=False):
     
     total_time = time.time() - start_time
     logger.info(f"📡 并发检测完成，发现 {len(available_ips)} 个可用IP，总耗时: {total_time:.1f}秒")
+    
+    # 如果测试了带宽，显示排名
+    if test_bandwidth and available_ips and len(available_ips[0]) > 5:
+        logger.info("📊 ===== 最终排名 =====")
+        for i, (ip, min_delay, avg_delay, bandwidth, latency, score) in enumerate(available_ips, 1):
+            logger.info(f"📊 [{i}/{len(available_ips)}] {ip}（延迟 {min_delay}ms，带宽 {bandwidth:.2f}Mbps，评分 {score:.1f}）- 耗时: {total_time:.1f}s")
+    
     return available_ips
 
 def get_regions_concurrently(ips, max_workers=None):
@@ -708,21 +894,67 @@ def main():
         logger.warning("⚠️ 没有解析到任何IP地址，程序结束")
         return
 
-    # 5. 并发检测IP可用性
-    logger.info("📡 ===== 并发检测IP可用性 =====")
-    # 可以选择是否测试带宽（默认只测试延迟）
-    test_bandwidth = False  # 设置为True来测试带宽
-    available_ips = test_ips_concurrently(unique_ips, test_bandwidth=test_bandwidth)
+    # 5. 快速筛选IP（剔除明显不好的）
+    logger.info("🔍 ===== 快速筛选IP =====")
+    filtered_ips = quick_filter_ips(unique_ips)
     
-    # 6. 保存可用IP列表
-    if available_ips:
-        with open('DNSIPlist.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join([ip for ip, _, _ in available_ips]))
-        logger.info(f"📄 已保存 {len(available_ips)} 个可用IP到 DNSIPlist.txt")
+    if not filtered_ips:
+        logger.warning("⚠️ 快速筛选后没有可用IP，程序结束")
+        return
+    
+    # 6. 立即保存基础文件（快速筛选完成后）
+    logger.info("📄 ===== 保存基础文件 =====")
+    with open('DNSIPlist.txt', 'w', encoding='utf-8') as f:
+        for ip in filtered_ips:
+            f.write(f"{ip}\n")
+    logger.info(f"📄 已保存 {len(filtered_ips)} 个可用IP到 DNSIPlist.txt")
+    
+    # 6. TCP Ping测试（只测试延迟，不测试带宽）
+    logger.info("🔍 ===== TCP Ping测试 =====")
+    tcp_ping_ips = test_ips_concurrently(filtered_ips, test_bandwidth=False)
+    
+    # 7. 延迟排名前30%筛选
+    if CONFIG["advanced_mode"] and tcp_ping_ips:
+        logger.info("🔍 ===== 延迟排名前30%筛选 =====")
+        latency_filtered_ips = latency_filter_ips(tcp_ping_ips)
         
-        # 7. 并发地区识别与结果格式化
+        # 8. 带宽测试（只对筛选后的IP进行带宽测试）
+        logger.info("⚡ ===== 带宽测试 =====")
+        available_ips = test_ips_concurrently([ip for ip, _, _, _ in latency_filtered_ips], test_bandwidth=True)
+    else:
+        # 如果没有开启高级模式，直接进行带宽测试
+        logger.info("⚡ ===== 带宽测试 =====")
+        available_ips = test_ips_concurrently(filtered_ips, test_bandwidth=True)
+    
+    # 9. 保存文件（按评分排序）
+    if available_ips:
+        # 按评分排序（如果测试了带宽）
+        if len(available_ips[0]) > 5:
+            available_ips.sort(key=lambda x: x[5], reverse=True)  # 按评分排序
+            logger.info(f"📊 按综合评分排序完成")
+        
+        # 基础文件已经在快速筛选后保存，这里不需要重复保存
+        
+        # 保存高级文件（高级选项）
+        if CONFIG["advanced_mode"] and len(available_ips[0]) > 5:
+            # 保存优选IP
+            with open('DNSIPlist-Pro.txt', 'w', encoding='utf-8') as f:
+                for ip, min_delay, avg_delay, bandwidth, latency, score in available_ips:
+                    f.write(f"{ip}#评分:{score}\n")
+            logger.info(f"📄 已保存 {len(available_ips)} 个优选IP到 DNSIPlist-Pro.txt")
+            
+            # 保存排名详情
+            with open('Ranking.txt', 'w', encoding='utf-8') as f:
+                for i, (ip, min_delay, avg_delay, bandwidth, latency, score) in enumerate(available_ips, 1):
+                    f.write(f"📊 [{i}/{len(available_ips)}] {ip}（延迟 {min_delay}ms，带宽 {bandwidth:.2f}Mbps，评分 {score:.1f}）\n")
+            logger.info(f"📄 已保存排名详情到 Ranking.txt")
+        
+        # 10. 并发地区识别与结果格式化
         logger.info("🌍 ===== 并发地区识别与结果格式化 =====")
-        region_results = get_regions_concurrently(available_ips)
+        # 使用快速筛选的IP进行地区识别
+        ip_delay_data = [(ip, 0, 0) for ip in filtered_ips]  # 使用快速筛选的IP，延迟设为0
+        
+        region_results = get_regions_concurrently(ip_delay_data)
         
         # 按地区分组
         region_groups = defaultdict(list)
@@ -742,9 +974,16 @@ def main():
             logger.debug(f"地区 {region} 格式化完成，包含 {len(sorted_ips)} 个IP")
         
         if result:
+            # 立即保存基础文件
             with open('SenflareDNS.txt', 'w', encoding='utf-8') as f:
                 f.write('\n'.join(result))
-            logger.info(f"📊 已保存 {len(result)} 条格式化记录到 SenflareDNS.txt")
+            logger.info(f"📄 已保存 {len(result)} 条格式化记录到 SenflareDNS.txt")
+            
+            # 保存高级格式化文件（高级选项）
+            if CONFIG["advanced_mode"]:
+                with open('SenflareDNS-Pro.txt', 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(result))
+                logger.info(f"📄 已保存 {len(result)} 条高级格式化记录到 SenflareDNS-Pro.txt")
         else:
             logger.warning("⚠️ 无有效记录可保存")
         
