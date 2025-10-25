@@ -64,8 +64,11 @@ jobs:
         with:
           name: dns-ip-results # 产物名称
           path: | # 上传的文件路径
-            DNSIPlist.txt # 可用IP列表
-            SenflareDNS.txt # 格式化结果
+            DNSIPlist.txt # 基础版可用IP列表
+            SenflareDNS.txt # 基础版格式化结果
+            DNSIPlist-Pro.txt # 高级版可用IP列表
+            SenflareDNS-Pro.txt # 高级版格式化结果
+            Ranking.txt # 排名详情
             DNSIPtest.log # 运行日志
             Cache.json # 地区缓存
       
@@ -77,7 +80,7 @@ jobs:
           git config --local user.name "GitHub Action"
           
           # 添加结果文件到暂存区
-          git add DNSIPlist.txt SenflareDNS.txt Cache.json DNSIPtest.log
+          git add DNSIPlist.txt SenflareDNS.txt DNSIPlist-Pro.txt SenflareDNS-Pro.txt Ranking.txt Cache.json DNSIPtest.log
           
           # 检查文件是否有变化，有变化则提交
           git diff --staged --quiet || git commit -m "Update DNS IP results - $(date)"
