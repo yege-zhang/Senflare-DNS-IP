@@ -1,4 +1,4 @@
-# DNS IP Test - Cloudflare优选域名DNS解析器自动化工作流 v1.0.0
+# DNS IP Test - Cloudflare优选域名DNS解析器自动化工作流
 # 每3小时自动执行一次，用于解析、检测和识别Cloudflare优选域名的IP状态
 #
 # 主要特性:

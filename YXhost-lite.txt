@@ -9,4 +9,27 @@
 #请在此处添加实际的优选域名
 #
 # 当前示例
-orange.seeck.cn#简睿 | 三网专线 | 01
+orange.seeck.cn#简睿
+nrtcfdns.zone.id#简睿
+freeyx.cloudflare88.eu.org#简睿
+777.ai7777777.xyz#简睿
+cfsaas.080112.xyz#简睿
+ali.nonull.pp.ua#简睿
+cdn.204910.best#简睿
+hj.xmm1993.top#简睿
+cf.877774.xyz#秋名山
+saas.sin.fan#MIYU
+cf.130519.xyz#小小周
+b3.cfyx.20237737.xyz#七十二时
+cf.zhetengsha.eu.org#小一
+one.cf.cdn.hyli.xyz#行雺
+cf.090227.xyz#CMLiussss
+youxuan.cf.090227.xyz#CMLiussss
+sub.danfeng.eu.org#Dance
+cdns.doon.eu.org#Doon
+nrt.xxxxxxxx.nyc.mn#Nrt
+www.openai.com#OpenAI
+www.shopify.com#Shopify
+mfa.gov.ua#乌克兰
+store.ubi.com#Ubisoft
+www.nexusmods.com#NexusMods
